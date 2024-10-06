@@ -12,10 +12,8 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors({
-  origin: ['https://ecub-bot3.vercel.app', 'http://localhost:5173'],
-  credentials: true
-}));
+// Allow all origins
+app.use(cors());
 app.use(bodyParser.json());
 
 // Initialize Firebase Admin SDK
@@ -64,18 +62,6 @@ const OrderSchema = new mongoose.Schema({
 
 const Order = mongoose.model('Order', OrderSchema);
 
-// Middleware to verify JWT token
-const verifyToken = (req, res, next) => {
-    const token = req.headers['authorization'];
-    if (!token) return res.status(403).send({ auth: false, message: 'No token provided.' });
-    
-    jwt.verify(token.split(' ')[1], process.env.JWT_SECRET, (err, decoded) => {
-        if (err) return res.status(500).send({ auth: false, message: 'Failed to authenticate token.' });
-        req.userId = decoded.id;
-        next();
-    });
-};
-
 // User registration
 app.post('/api/signup', async (req, res) => {
     try {
@@ -89,7 +75,7 @@ app.post('/api/signup', async (req, res) => {
             isWorker
         });
         await user.save();
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: 600 });
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
         res.status(201).send({ auth: true, token, user: { id: user._id, username: user.username } });
     } catch (error) {
         res.status(500).send({ error: 'Error registering user' });
@@ -108,12 +94,11 @@ app.post('/api/login', async (req, res) => {
         if (!isMatch) {
             return res.status(400).json({ message: 'Invalid credentials' });
         }
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
         res.json({
             user: {
                 _id: user._id,
                 username: user.username,
-                // Include other user fields as needed, but exclude sensitive information like password
             },
             token
         });
@@ -124,9 +109,9 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Get user profile
-app.get('/api/users/me', verifyToken, async (req, res) => {
+app.get('/api/users/me', async (req, res) => {
     try {
-        const user = await User.findById(req.userId).select('-password');
+        const user = await User.findById(req.query.userId).select('-password');
         if (!user) return res.status(404).send('User not found');
         res.status(200).send(user);
     } catch (error) {
@@ -135,7 +120,7 @@ app.get('/api/users/me', verifyToken, async (req, res) => {
 });
 
 // Update user profile
-app.put('/api/users/:id', verifyToken, async (req, res) => {
+app.put('/api/users/:id', async (req, res) => {
     try {
         const { username, homeAddress, workAddress } = req.body;
         const user = await User.findByIdAndUpdate(req.params.id, 
@@ -149,11 +134,11 @@ app.put('/api/users/:id', verifyToken, async (req, res) => {
 });
 
 // Create a new order
-app.post('/api/orders', verifyToken, async (req, res) => {
+app.post('/api/orders', async (req, res) => {
     try {
-      const { items, totalPrice, deliveryAddress, phoneNumber, paymentMethod } = req.body;
+      const { userId, items, totalPrice, deliveryAddress, phoneNumber, paymentMethod } = req.body;
       const newOrder = new Order({
-        userId: req.userId,
+        userId,
         items,
         totalPrice,
         deliveryAddress,
@@ -166,7 +151,7 @@ app.post('/api/orders', verifyToken, async (req, res) => {
       console.error('Error creating order:', error);
       res.status(500).json({ message: 'Error creating order' });
     }
-  });
+});
 
 // Get user's order history
 app.get('/api/orders/:userId', async (req, res) => {
@@ -181,9 +166,7 @@ app.get('/api/orders/:userId', async (req, res) => {
       console.error('Error fetching orders:', error);
       res.status(500).json({ error: 'Failed to fetch orders' });
     }
-  });
-
-// Existing routes and functions...
+});
 
 app.post('/api/chat', async (req, res) => {
     try {
@@ -193,11 +176,9 @@ app.post('/api/chat', async (req, res) => {
             return res.status(400).json({ error: 'Message or meal type is required' });
         }
 
-        // Fetch menu items from Firestore
         const menuSnapshot = await db.collection('fs_food_items1').get();
         const menu = menuSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-        // Process personalized recommendations
         const recommendations = await getPersonalizedRecommendations(message, menu, mealType, userLocation);
 
         res.json({
@@ -224,7 +205,7 @@ async function addHotelInfoAndDistance(items, userLocation) {
                 distance = geolib.getDistance(
                     { latitude: parseFloat(userLocation.latitude), longitude: parseFloat(userLocation.longitude) },
                     { latitude: parseFloat(hotelData.latitude), longitude: parseFloat(hotelData.longitude) }
-                ) / 1000; // Convert meters to kilometers
+                ) / 1000;
             } catch (error) {
                 console.error("Error calculating distance:", error);
             }
@@ -241,18 +222,15 @@ async function addHotelInfoAndDistance(items, userLocation) {
 async function getPersonalizedRecommendations(query, menu, mealType, userLocation) {
     try {
         if (query) {
-            // First, try to find exact matches
             const exactMatches = menu.filter(item => 
                 item.productTitle.toLowerCase().includes(query.toLowerCase())
             );
 
             if (exactMatches.length > 0) {
-                // If we have exact matches, return them
                 return exactMatches.slice(0, 5);
             }
         }
 
-        // If no exact matches or no query, proceed with AI recommendations
         const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         let prompt = `You are an AI assistant for a food ordering platform. `;
         
@@ -272,7 +250,6 @@ async function getPersonalizedRecommendations(query, menu, mealType, userLocatio
         const content = result.response.text();
         console.log("Raw Gemini response for recommendations:", content);
 
-        // Remove any non-JSON content
         const jsonContent = content.replace(/^[\s\S]*?(\[[\s\S]*\])[\s\S]*$/, '$1');
 
         let recommendedItems;
@@ -283,15 +260,12 @@ async function getPersonalizedRecommendations(query, menu, mealType, userLocatio
             return [];
         }
 
-        // Sort items by relevance
         recommendedItems.sort((a, b) => b.relevance - a.relevance);
 
-        // Get full menu items for the recommended IDs and add hotel info
         const recommendations = await Promise.all(recommendedItems.map(async item => {
             const menuItem = menu.find(m => m.id === item.id);
             if (!menuItem) return null;
 
-            // Fetch hotel info
             const hotelDoc = await db.collection('fs_hotels').doc(menuItem.productOwnership).get();
             const hotelData = hotelDoc.exists ? hotelDoc.data() : null;
 
@@ -302,7 +276,7 @@ async function getPersonalizedRecommendations(query, menu, mealType, userLocatio
                     distance = geolib.getDistance(
                         { latitude: parseFloat(userLocation.latitude), longitude: parseFloat(userLocation.longitude) },
                         { latitude: parseFloat(hotelData.latitude), longitude: parseFloat(hotelData.longitude) }
-                    ) / 1000; // Convert meters to kilometers
+                    ) / 1000;
                 } catch (error) {
                     console.error("Error calculating distance:", error);
                 }
@@ -323,7 +297,7 @@ async function getPersonalizedRecommendations(query, menu, mealType, userLocatio
         return [];
     }
 }
-// Helper function to shuffle an array
+
 function shuffleArray(array) {
     for (let i = array.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -334,7 +308,6 @@ function shuffleArray(array) {
 
 app.get('/api/recommendations', async (req, res) => {
     try {
-        // Implement logic to fetch recommendations from Firestore
         const recommendationsSnapshot = await db.collection('recommendations').limit(5).get();
         const recommendations = recommendationsSnapshot.docs.map(doc => doc.data());
         res.json(recommendations);
@@ -382,19 +355,16 @@ app.get('/api/personalized-recommendations', async (req, res) => {
             recommendations = menu.filter(item => 
                 item.foodAvailTime && item.foodAvailTime.toLowerCase() === mealType.toLowerCase()
             );
-            // Shuffle the filtered items and take the first 5
             recommendations = shuffleArray(recommendations).slice(0, 5);
         }
 
         console.log('Filtered recommendations:', recommendations.length);
 
-        // If no matches found, return some random items
         if (recommendations.length === 0) {
             recommendations = shuffleArray(menu).slice(0, 5);
             console.log('No matches found, returning random items');
         }
 
-        // Fetch hotel info and calculate distances
         const userLocation = latitude && longitude ? { latitude, longitude } : null;
         recommendations = await addHotelInfoAndDistance(recommendations, userLocation);
 
@@ -405,7 +375,6 @@ app.get('/api/personalized-recommendations', async (req, res) => {
         res.status(500).json({ error: "Failed to fetch personalized recommendations", details: error.message });
     }
 });
-
 app.get('/api/nearby-hotels', async (req, res) => {
     try {
       const { latitude, longitude } = req.query;
@@ -420,7 +389,7 @@ app.get('/api/nearby-hotels', async (req, res) => {
           const distance = geolib.getDistance(
             { latitude: parseFloat(latitude), longitude: parseFloat(longitude) },
             { latitude: parseFloat(hotel.latitude), longitude: parseFloat(hotel.longitude) }
-          ) / 1000; // Convert meters to kilometers
+          ) / 1000;
           return { 
             id: hotel.id,
             name: hotel.hotelName || 'Unnamed Hotel',
@@ -436,9 +405,9 @@ app.get('/api/nearby-hotels', async (req, res) => {
           return null;
         }
       })
-      .filter(Boolean) // Remove any null entries
+      .filter(Boolean)
       .sort((a, b) => a.distance - b.distance)
-      .slice(0, 5); // Get top 5 nearest hotels
+      .slice(0, 5);
       
       res.json(nearbyHotels);
     } catch (error) {
@@ -446,13 +415,11 @@ app.get('/api/nearby-hotels', async (req, res) => {
       res.status(500).json({ error: "Failed to fetch nearby hotels" });
     }
   });
-
-// Keep the app.listen() for local development
-if (process.env.NODE_ENV !== 'production') {
+  
+  if (process.env.NODE_ENV !== 'production') {
     app.listen(port, () => {
-        console.log(`Server is running on port ${port}`);
+      console.log(`Server is running on port ${port}`);
     });
-}
-
-// Export the Express app for Vercel
-module.exports = app;
+  }
+  
+  module.exports = app;
